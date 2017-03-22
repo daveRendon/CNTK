@@ -11,10 +11,30 @@ import pytest
 
 from cntk.io import *
 import cntk.io.transforms as xforms
+from cntk.cntk_py import to_dictionary
+from cntk.cntk_py import MinibatchSourceConfig
 
 abs_path = os.path.dirname(os.path.abspath(__file__))
 
 AA = np.asarray
+
+def create_temp_file(tmpdir):
+    tmpfile = str(tmpdir/'mbtest.txt')
+    with open(tmpfile, 'w') as f:
+        f.write("|S0 1\n|S0 2\n|S0 3\n|S0 4")
+    return tmpfile
+
+def create_ctf_deserializer(tmpdir):
+    tmpfile = create_temp_file(tmpdir)
+    return CTFDeserializer(tmpfile, StreamDefs(features  = StreamDef(field='S0', shape=1)))
+
+def create_config(tmpdir):
+    tmpfile = create_temp_file(tmpdir)
+    return MinibatchSourceConfig() \
+        .add_deserializer(
+            CTFDeserializer(tmpfile, 
+                StreamDefs(features  = StreamDef(field='S0', shape=1))))
+
 
 def test_text_format(tmpdir):
     mbdata = r'''0	|x 560:1	|y 1 0 0 0 0
@@ -81,80 +101,123 @@ def test_text_format(tmpdir):
     assert features.num_samples < 7
     assert labels.num_samples == 1
 
-def test_sweeps_and_samples_in_minibatch_source_config():
-    config = MinibatchSourceConfig(False)
+def check_default_config_keys(d):
+        assert 5 <= len(d.keys())
+        assert False == d['frameMode']
+        assert False == d['multiThreadedDeserialization']
+        assert TraceLevel.Warning == d['traceLevel']
+        assert 'randomize' in d.keys()
+        assert 'deserializers' in d.keys()
 
-    assert INFINITELY_REPEAT == config.get_max_samples()
-    assert INFINITELY_REPEAT == config.get_max_sweeps()
+def test_minibatch_source_config_constructor(tmpdir):
+    ctf = create_ctf_deserializer(tmpdir)
 
-    config.set_max_samples(100)
-    assert 100 == config.get_max_samples()
-    assert INFINITELY_REPEAT == config.get_max_sweeps()
-
-    config.set_max_samples(20)
-    assert 20 == config.get_max_samples()
-    assert INFINITELY_REPEAT == config.get_max_sweeps()
-
-    config.set_max_sweeps(3)
-    assert 20 == config.get_max_samples()
-    assert 3 == config.get_max_sweeps()
-
-    dictionary = config.as_dictionary()
-
-    assert 3 == len(dictionary.keys())
-    assert 20 == dictionary['maxSamples']
-    assert 3 == dictionary['maxSweeps']
+    config = MinibatchSourceConfig([ctf], False)
+    dictionary = to_dictionary(config)
+    check_default_config_keys(dictionary)
+    assert 5 == len(dictionary.keys())
     assert False == dictionary['randomize']
-    
-def test_randomization_in_minibatch_source_config():
-    config = MinibatchSourceConfig(True)
-    dictionary = config.as_dictionary()
 
-    assert 3 == len(dictionary.keys())
-    assert False == dictionary['sampleBasedRandomizationWindow']
+    config = MinibatchSourceConfig([ctf], True)
+    dictionary = to_dictionary(config)
+    check_default_config_keys(dictionary)
+
+    assert 7 == len(dictionary.keys())
+    assert True == dictionary['randomize']
     assert DEFAULT_RANDOMIZATION_WINDOW_IN_CHUNKS == dictionary['randomizationWindow']
-    assert True == dictionary['randomize']
-
-    config.set_randomization_window_in_samples(12345)
-    dictionary = config.as_dictionary()
-
-    assert 3 == len(dictionary.keys())
-    assert True == dictionary['sampleBasedRandomizationWindow']
-    assert 12345 == dictionary['randomizationWindow']
-    assert True == dictionary['randomize']
-
-    config.set_randomization_window_in_chunks(321)
-    dictionary = config.as_dictionary()
-
-    assert 3 == len(dictionary.keys())
     assert False == dictionary['sampleBasedRandomizationWindow']
-    assert 321 == dictionary['randomizationWindow']
+
+    config = MinibatchSourceConfig([ctf]) # 'randomize' is omitted
+    dictionary = to_dictionary(config)
+    check_default_config_keys(dictionary)
+
+    assert 7 == len(dictionary.keys())
+    assert True == dictionary['randomize']
+    assert DEFAULT_RANDOMIZATION_WINDOW_IN_CHUNKS == dictionary['randomizationWindow']
+    assert False == dictionary['sampleBasedRandomizationWindow']
+
+def test_minibatch_source_config_sweeps_and_samples(tmpdir):
+    ctf = create_ctf_deserializer(tmpdir)
+    config = MinibatchSourceConfig([ctf])
+
+    assert INFINITELY_REPEAT == config.max_samples
+    assert INFINITELY_REPEAT == config.max_sweeps
+
+    config.max_samples = 100
+    config.max_sweeps = 3
+    assert 100 == config.max_samples
+    assert 3 == config.max_sweeps
+    
+    with pytest.raises(Exception):
+        # to_dictionary will validate the config
+        dictionary = to_dictionary(config)
+
+    config.max_samples = INFINITELY_REPEAT
+    dictionary = to_dictionary(config)
+    check_default_config_keys(dictionary)
+
+def test_minibatch_source_config_randomization(tmpdir):
+    ctf = create_ctf_deserializer(tmpdir)
+    config = MinibatchSourceConfig([ctf])
+
+    dictionary = to_dictionary(config)
+    check_default_config_keys(dictionary)
     assert True == dictionary['randomize']
 
-def test_all_other_parameters_minibatch_source_config():
-    config = MinibatchSourceConfig(False) \
-        .set_trace_level(TraceLevel.Warning) \
-        .set_frame_mode(True) \
-        .set_multithreaded(True)
+    config.randomization_window_in_chunks = 0
+    dictionary = to_dictionary(config)
+    check_default_config_keys(dictionary)
+    assert False == dictionary['randomize']
 
+    config.randomization_window_in_chunks = 10
+    dictionary = to_dictionary(config)
+    check_default_config_keys(dictionary)
+    assert True == dictionary['randomize']
+    assert 10 == dictionary['randomizationWindow']
+    assert False == dictionary['sampleBasedRandomizationWindow']
 
-    dictionary = config.as_dictionary()
+    config.randomization_window_in_samples = 100
+    with pytest.raises(Exception):
+        # to_dictionary will validate the config
+        dictionary = to_dictionary(config)
 
-    assert 4 == len(dictionary.keys())
-    assert 1 == dictionary['traceLevel']
+    config.randomization_window_in_chunks = 0
+    dictionary = to_dictionary(config)
+    check_default_config_keys(dictionary)
+    assert True == dictionary['randomize']
+    assert 100 == dictionary['randomizationWindow']
+    assert True == dictionary['sampleBasedRandomizationWindow']
+    
+def test_minibatch_source_config_other_properties(tmpdir):
+    ctf = create_ctf_deserializer(tmpdir)
+    config = MinibatchSourceConfig([ctf])
+
+    config.is_multithreaded = True
+    config.trace_level = TraceLevel.Info.value
+    config.is_frame_mode_enabled = True
+
+    dictionary = to_dictionary(config)
+    assert 7 == len(dictionary.keys())
+    assert TraceLevel.Info == dictionary['traceLevel']
     assert True == dictionary['frameMode']
     assert True == dictionary['multiThreadedDeserialization']
-    
-    config.set_frame_mode(False).set_multithreaded(False) \
-          .set_trace_level(4) \
-          .set_truncation_length(314)
 
-    assert 6 == len(dictionary.keys())
-    assert 4 == dictionary['traceLevel']
+    config.is_multithreaded = False
+    config.trace_level = 0
+    config.truncation_length = 123
+    with pytest.raises(Exception):
+        # to_dictionary will validate the config
+        dictionary = to_dictionary(config)
+
+    config.is_frame_mode_enabled = False
+
+    dictionary = to_dictionary(config)
+    assert 9 == len(dictionary.keys())
+    assert 0 == dictionary['traceLevel']
     assert False == dictionary['frameMode']
     assert False == dictionary['multiThreadedDeserialization']
     assert True == dictionary['truncated']
-    assert 314 == dictionary['truncationLength']
+    assert 123 == dictionary['truncationLength']
 
 def test_image():
     map_file = "input.txt"
@@ -174,14 +237,10 @@ def test_image():
         xforms.mean(mean_file)]
     image = ImageDeserializer(map_file, StreamDefs(f = StreamDef(field='image', transforms=transforms), l = StreamDef(field='label', shape=num_classes)))
 
-    config = MinibatchSourceConfig(randomize=False).set_max_samples(epoch_size).add_deserializer(image)
-    rc = config.as_dictionary()
-
-    assert rc['maxSamples'] == epoch_size
-    assert rc['randomize'] == False
-
-    assert len(rc['deserializers']) == 1
-    d = rc['deserializers'][0]
+    config = to_dictionary(MinibatchSourceConfig([image], randomize=False))
+    
+    assert len(config['deserializers']) == 1
+    d = config['deserializers'][0]
     assert d['type'] == 'ImageDeserializer'
     assert d['file'] == map_file
     assert set(d['input'].keys()) == {label_name, feature_name}
@@ -191,7 +250,7 @@ def test_image():
 
     f = d['input'][feature_name]
     assert set(f.keys()) == { 'transforms' }
-    t0, t1, t2 = f['transforms']
+    t0, t1, t2, _ = f['transforms']
     assert t0['type'] == 'Crop'
     assert t1['type'] == 'Scale'
     assert t2['type'] == 'Mean'
@@ -205,45 +264,16 @@ def test_image():
     assert t1['interpolations'] == 'linear'
     assert t2['meanFile'] == mean_file
 
-    randomization_window = 100
+    
+    config = to_dictionary(MinibatchSourceConfig([image, image]))
+    assert len(config['deserializers']) == 2
 
-    config = MinibatchSourceConfig(randomize=False).set_max_samples(epoch_size).add_deserializer(image) \
-                .set_randomization_window_in_samples(randomization_window)
-    rc = config.as_dictionary()
-
-    assert rc['maxSamples'] == epoch_size
-    assert rc['randomize'] == True
-    assert rc['randomizationWindow'] == randomization_window
-    assert rc['sampleBasedRandomizationWindow'] == True
-    assert len(rc['deserializers']) == 1
-    d = rc['deserializers'][0]
-    assert d['type'] == 'ImageDeserializer'
-    assert d['file'] == map_file
-    assert set(d['input'].keys()) == {label_name, feature_name}
-
-    l = d['input'][label_name]
-    assert l['labelDim'] == num_classes
-
-    config = MinibatchSourceConfig().set_max_samples(FULL_DATA_SWEEP).add_deserializer(image) \
-                .set_randomization_window_in_chunks(randomization_window)
-    rc = config.as_dictionary()
-
-    assert rc['maxSamples'] == FULL_DATA_SWEEP
-    assert rc['randomize'] == True
-    assert rc['randomizationWindow'] == randomization_window
-    assert rc['sampleBasedRandomizationWindow'] == False
-    assert len(rc['deserializers']) == 1
-    d = rc['deserializers'][0]
-    assert d['type'] == 'ImageDeserializer'
-    assert d['file'] == map_file
-    assert set(d['input'].keys()) == {label_name, feature_name}
-
-    l = d['input'][label_name]
-    assert l['labelDim'] == num_classes
+    config = to_dictionary(MinibatchSourceConfig([image, image, image]))
+    assert len(config['deserializers']) == 3
 
     # TODO depends on ImageReader.dll
     '''
-    mbs = rc.minibatch_source()
+    mbs = config.create_minibatch_source()
     sis = mbs.stream_infos()
     assert set(sis.keys()) == { feature_name, label_name }
     '''
@@ -266,7 +296,7 @@ def test_full_sweep_minibatch(tmpdir):
     mb_source = MinibatchSource(CTFDeserializer(tmpfile, StreamDefs(
         features  = StreamDef(field='S0', shape=1),
         labels    = StreamDef(field='S1', shape=1))),
-        randomize=False, epoch_size=FULL_DATA_SWEEP)
+        randomization_window_in_chunks=0, max_sweeps=1)
 
     features_si = mb_source.stream_info('features')
     labels_si = mb_source.stream_info('labels')
@@ -307,23 +337,9 @@ def test_full_sweep_minibatch(tmpdir):
             [[2, 1, 1],
              [2, 1, 0]])
 
-def create_temp_file(tmpdir):
-    tmpfile = str(tmpdir/'mbtest.txt')
-    with open(tmpfile, 'w') as f:
-        f.write("|S0 1\n|S0 2\n|S0 3\n|S0 4")
-    return tmpfile
-
-def create_config(tmpdir):
-    tmpfile = create_temp_file(tmpdir)
-    return MinibatchSourceConfig() \
-        .add_deserializer(
-            CTFDeserializer(tmpfile, 
-                StreamDefs(features  = StreamDef(field='S0', shape=1))))
-
-def test_set_max_samples(tmpdir):
-    mb_source = create_config(tmpdir) \
-        .set_max_samples(1) \
-        .create_minibatch_source()
+def test_max_samples(tmpdir):
+    mb_source = MinibatchSource(
+        create_ctf_deserializer(tmpdir), max_samples=1)
 
     input_map = {'features' : mb_source['features']}
     mb = mb_source.next_minibatch(10, input_map)
@@ -336,11 +352,10 @@ def test_set_max_samples(tmpdir):
 
     assert not mb
 
-def test_set_max_sweeps(tmpdir):
+def test_max_sweeps(tmpdir):
     # set max sweeps to 3 (12 samples altogether).
-    mb_source = create_config(tmpdir) \
-        .set_max_sweeps(3) \
-        .create_minibatch_source()
+    mb_source = MinibatchSource(
+        create_ctf_deserializer(tmpdir), max_sweeps=3)
 
     input_map = {'features' : mb_source['features']}
 
@@ -361,12 +376,9 @@ def test_set_max_sweeps(tmpdir):
 
     assert not mb
 
-def test_set_max_sweeps_and_max_samples(tmpdir):
-    # set max sweeps to 3 (12 samples altogether).
-    mb_source = create_config(tmpdir) \
-        .set_max_sweeps(3) \
-        .set_max_samples(11) \
-        .create_minibatch_source()
+def test_max_samples_over_several_sweeps(tmpdir):
+    mb_source = MinibatchSource(
+        create_ctf_deserializer(tmpdir), max_samples=11)
 
     input_map = {'features' : mb_source['features']}
 
@@ -388,25 +400,13 @@ def test_set_max_sweeps_and_max_samples(tmpdir):
     assert not mb
 
 def test_one_sweep(tmpdir):
-    sources = []
-    sources.append(create_config(tmpdir) \
-        .set_max_sweeps(1) \
-        .create_minibatch_source())
-
-    sources.append(create_config(tmpdir) \
-        .set_max_sweeps(INFINITELY_REPEAT) \
-        .set_max_samples(FULL_DATA_SWEEP) \
-        .create_minibatch_source())
-
-    sources.append(create_config(tmpdir) \
-        .set_max_sweeps(1) \
-        .set_max_samples(FULL_DATA_SWEEP) \
-        .create_minibatch_source())
-
-    sources.append(create_config(tmpdir) \
-        .set_max_sweeps(1) \
-        .set_max_samples(INFINITELY_REPEAT) \
-        .create_minibatch_source())
+    ctf = create_ctf_deserializer(tmpdir)
+    sources = [ MinibatchSource(ctf, max_sweeps=1),
+                MinibatchSource(ctf, max_samples=FULL_DATA_SWEEP),
+                MinibatchSource(ctf, max_sweeps=1,
+                    max_samples=INFINITELY_REPEAT),
+                MinibatchSource(ctf, max_samples=FULL_DATA_SWEEP,
+                    max_sweeps=INFINITELY_REPEAT) ]
 
     for source in sources:
         input_map = {'features' : source['features']}
@@ -439,7 +439,7 @@ def test_large_minibatch(tmpdir):
     mb_source = MinibatchSource(CTFDeserializer(tmpfile, StreamDefs(
         features  = StreamDef(field='S0', shape=1),
         labels    = StreamDef(field='S1', shape=1))),
-        randomize=False)
+        randomization_window_in_chunks=0)
 
     features_si = mb_source.stream_info('features')
     labels_si = mb_source.stream_info('labels')
